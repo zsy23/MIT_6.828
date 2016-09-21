@@ -270,7 +270,11 @@ mem_init_mp(void)
 	//     Permissions: kernel RW, user NONE
 	//
 	// LAB 4: Your code here:
-
+	uintptr_t kstacktop_i;
+	for (int i = 0; i < NCPU; i++) {
+		kstacktop_i = KSTACKTOP - i * (KSTKSIZE + KSTKGAP);
+		boot_map_region(kern_pgdir, kstacktop_i-KSTKSIZE, KSTKSIZE, PADDR(percpu_kstacks[i]), PTE_W);
+	}
 }
 
 // --------------------------------------------------------------
@@ -309,11 +313,13 @@ page_init(void)
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
+	extern unsigned char mpentry_start[], mpentry_end[];
 	size_t i;
 	page_free_list = NULL;
 	for (i = 0; i < npages; i++) {
 		if (i == 0 || 
-			(page2pa(pages + i) >= IOPHYSMEM && page2kva(pages + i) < boot_alloc(0))) {
+			(page2pa(pages + i) >= IOPHYSMEM && page2kva(pages + i) < boot_alloc(0)) ||
+			(page2pa(pages + i) >= MPENTRY_PADDR && page2pa(pages + i) <= ROUNDDOWN(MPENTRY_PADDR + mpentry_end - mpentry_start, PGSIZE))) {
 			pages[i].pp_ref = 1;
 			pages[i].pp_link = NULL;
 			continue;
@@ -484,12 +490,9 @@ page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 	if (!pte) 
 		return -E_NO_MEM;
 	tlb_invalidate(pgdir, va);
-	if (*pte & PTE_P) {
-		page_remove(pgdir, va);
-	}
-	if (pp == page_free_list)
-		pp = page_alloc(0);
 	pp->pp_ref++;
+	if (*pte & PTE_P)
+		page_remove(pgdir, va);
 	*pte = page2pa(pp) | perm | PTE_P;	
 
 	return 0;
@@ -591,7 +594,13 @@ mmio_map_region(physaddr_t pa, size_t size)
 	// Hint: The staff solution uses boot_map_region.
 	//
 	// Your code here:
-	panic("mmio_map_region not implemented");
+	// panic("mmio_map_region not implemented");
+	size = ROUNDUP(size, PGSIZE);
+	if(base + size > MMIOLIM)
+		panic("mmio_map_region overflow MMIOLIM");
+	boot_map_region(kern_pgdir, base, size, pa, PTE_PCD | PTE_PWT | PTE_W);
+	base += size;
+	return (void *)(base - size);
 }
 
 static uintptr_t user_mem_check_addr;
@@ -620,20 +629,24 @@ user_mem_check(struct Env *env, const void *va, size_t len, int perm)
 	// LAB 3: Your code here.
 	for (size_t i = 0; i < len / PGSIZE + 1; i += 1) {
 		if ((uintptr_t)(va + PGSIZE * i) >= ULIM) {
-			if (i == 0)
+			if (i == 0) {
 				user_mem_check_addr = (uintptr_t)(va);
-			else
+			}
+			else {
 				user_mem_check_addr = ROUNDDOWN((uintptr_t)(va + PGSIZE * i), PGSIZE);
+			}
 			return -E_FAULT;
 		}
 		pte_t *pte = pgdir_walk(env->env_pgdir, va + PGSIZE * i, 0);
 		if (!pte || (*pte & PTE_P) == 0 ||
 			((perm & PTE_U) < (*pte & PTE_U)) ||
 			((perm & PTE_W) > (*pte & PTE_W))) {
-			if (i == 0)
+			if (i == 0) {
 				user_mem_check_addr = (uintptr_t)(va);
-			else
+			}
+			else {
 				user_mem_check_addr = ROUNDDOWN((uintptr_t)(va + PGSIZE * i), PGSIZE);
+			}
 			return -E_FAULT;
 		}
 	}
